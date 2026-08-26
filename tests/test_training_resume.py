@@ -49,6 +49,10 @@ class TrainingResumeTest(unittest.TestCase):
             local_sft_epochs=2,
             local_sft_learning_rate=0.02,
             local_sft_replay_capacity_per_kind=16,
+            opd_episodes_per_update=1,
+            opd_epochs=2,
+            opd_learning_rate=0.1,
+            opd_annotation_query_cost=0.125,
         )
 
         with tempfile.TemporaryDirectory() as directory:

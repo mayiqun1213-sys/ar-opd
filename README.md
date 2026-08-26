@@ -14,8 +14,8 @@ treated as student actions in the PPO actor objective.
 
 ## Development setup
 
-The initial implementation targets Python 3.10+ and PyTorch. A no-download
-test run only needs the standard library:
+The implementation targets Python 3.10+ and PyTorch. Once the declared runtime
+dependency is installed, tests need no model downloads or optional services:
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
@@ -24,10 +24,13 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 For an editable development install with optional lint/test tooling, use
 `python -m pip install -e '.[dev]'`.
 
-The first development stage uses a small deterministic environment so the
-rollout, accounting, and optimization invariants can be tested without model
-downloads or external services. TextWorldExpress support will be added behind
-an environment adapter.
+The current deterministic toy loop covers value-gated S/T/F rollout,
+decision-boundary PPO, executed-only local SFT, and strict Student-only OPD
+without model downloads or external services. See
+[`docs/implementation_notes.md`](docs/implementation_notes.md),
+[`docs/local_distillation.md`](docs/local_distillation.md), and
+[`docs/opd.md`](docs/opd.md) for the enforced data and optimizer boundaries.
+TextWorldExpress support will be added behind an environment adapter.
 
 ## Repository policy
 
