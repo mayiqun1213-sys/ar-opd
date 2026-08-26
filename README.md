@@ -28,8 +28,10 @@ The current deterministic toy loop covers value-gated S/T/F rollout,
 decision-boundary PPO, executed-only local SFT, and strict Student-only OPD
 without model downloads or external services. See
 [`docs/implementation_notes.md`](docs/implementation_notes.md),
-[`docs/local_distillation.md`](docs/local_distillation.md), and
-[`docs/opd.md`](docs/opd.md) for the enforced data and optimizer boundaries.
+[`docs/local_distillation.md`](docs/local_distillation.md),
+[`docs/opd.md`](docs/opd.md), and
+[`docs/environment_adapter.md`](docs/environment_adapter.md) for the
+enforced data and optimizer boundaries.
 TextWorldExpress support will be added behind an environment adapter.
 
 ## Repository policy

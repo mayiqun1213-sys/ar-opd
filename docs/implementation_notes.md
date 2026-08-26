@@ -54,13 +54,22 @@ PYTHONPATH=src python -m ar_opd.train_toy \
 
 Generated metrics and checkpoints are excluded from Git.
 
-## TextWorldExpress boundary
+## Environment runtime boundary
 
-TextWorldExpress will be optional rather than a base dependency. The current
-machine does not have TextWorldExpress or Java installed, so integration is
-deferred until that runtime can be tested. Its adapter must use explicit seeds,
-track episode parameters and action history itself, split task termination from
-the adapter's step-limit truncation, and close its JVM process reliably.
-Candidate replay should reuse scratch environments; a fresh JVM clone per
-candidate is too expensive. Gold paths are initial-state walkthroughs and will
-not be treated as a general correction oracle after the student diverges.
+The online rollout collector now depends on framework-neutral environment,
+Teacher, gate, and candidate-evaluator protocols. A context-managed adapter
+creates fresh seeded episode resources and owns their cleanup. Exact state
+branching is an optional capability used by the deterministic toy evaluator,
+not a requirement of every online environment. Student-only collection does
+not instantiate a Teacher. The toy path remains numerically identical and the
+checkpoint schema is unchanged.
+
+TextWorldExpress will remain optional rather than a base dependency. This
+machine has neither Java nor TextWorldExpress, so a real JVM backend cannot yet
+be smoke-tested. Its dynamic string actions require a separate policy-facing
+codec, and its replay-based clone is too expensive for one JVM per candidate.
+The next milestone will use a fake backend to establish dynamic action mapping,
+explicit episode traces, replay boundary fingerprints, and independent
+termination/truncation classification before adding the real lazy-imported
+backend. See [`environment_adapter.md`](environment_adapter.md) for the tested
+M3a contract and the M3b integration constraints.

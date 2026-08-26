@@ -12,9 +12,9 @@ from ar_opd.opd import (
     OPDAnnotationLedger,
     OPDConfig,
     OPDExample,
-    ToyOracleDistributionAnnotator,
     validate_probability_distribution,
 )
+from ar_opd.toy_runtime import ToyOracleDistributionAnnotator
 from ar_opd.train_toy import (
     ToyTrainConfig,
     _BASE_OPD_METRIC_FIELDS,
@@ -234,6 +234,7 @@ class M2BResumeMigrationBoundaryTest(unittest.TestCase):
             [],
             LocalSFTDataset(),
             config=config,
+            expected_action_size=2,
         )
 
         for key in (
@@ -250,6 +251,7 @@ class M2BResumeMigrationBoundaryTest(unittest.TestCase):
                         [],
                         LocalSFTDataset(),
                         config=config,
+                        expected_action_size=2,
                     )
 
         for key in (
@@ -267,6 +269,7 @@ class M2BResumeMigrationBoundaryTest(unittest.TestCase):
                         [],
                         LocalSFTDataset(),
                         config=config,
+                        expected_action_size=2,
                     )
 
         row = deepcopy(valid_row)
@@ -278,6 +281,7 @@ class M2BResumeMigrationBoundaryTest(unittest.TestCase):
                 [],
                 LocalSFTDataset(),
                 config=config,
+                expected_action_size=2,
             )
 
         invalid_costs = (
@@ -295,6 +299,7 @@ class M2BResumeMigrationBoundaryTest(unittest.TestCase):
                         [],
                         LocalSFTDataset(),
                         config=config,
+                        expected_action_size=2,
                     )
 
     def test_enabled_checkpoint_recursively_excludes_ephemeral_opd_payload(self) -> None:

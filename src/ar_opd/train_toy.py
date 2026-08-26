@@ -31,14 +31,13 @@ from ar_opd.opd import (
     OPDAnnotationLedger,
     OPDConfig,
     OPDDataset,
-    ToyOracleDistributionAnnotator,
     extract_student_only_opd,
     opd_update,
 )
 from ar_opd.ppo import PPOConfig, build_batch, ppo_update
-from ar_opd.rollout import RolloutCollector, RolloutConfig
-from ar_opd.teacher import OracleTeacher
-from ar_opd.toy_env import JammedChainConfig, JammedChainEnv
+from ar_opd.rollout import RolloutConfig, collect_episodes
+from ar_opd.toy_env import JammedChainConfig
+from ar_opd.toy_runtime import ToyOracleDistributionAnnotator, ToyRuntimeAdapter
 
 
 _METRIC_SCHEMA_VERSION = 2
@@ -132,6 +131,8 @@ class ToyTrainConfig:
     output_dir: str = "outputs/toy_smoke"
 
     def __post_init__(self) -> None:
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise TypeError("seed must be an integer")
         for name in ("opd_episodes_per_update", "opd_epochs"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
@@ -255,24 +256,15 @@ def _collect_episodes(
     deterministic_student: bool,
     generator: torch.Generator,
 ) -> list[EpisodeRollout]:
-    episodes: list[EpisodeRollout] = []
-    for episode_index in range(count):
-        env = JammedChainEnv(config.environment_config())
-        teacher = OracleTeacher(env.config)
-        collector = RolloutCollector(
-            config.rollout_config(probe_probability),
-            seed=seed + episode_index,
-            torch_generator=generator,
-        )
-        episodes.append(
-            collector.collect_episode(
-                env,
-                model,
-                teacher,
-                deterministic_student=deterministic_student,
-            )
-        )
-    return episodes
+    return collect_episodes(
+        ToyRuntimeAdapter(config.environment_config()),
+        model,
+        config.rollout_config(probe_probability),
+        count=count,
+        seed=seed,
+        deterministic_student=deterministic_student,
+        generator=generator,
+    )
 
 
 def evaluate(
@@ -479,6 +471,7 @@ def _validate_restored_history(
     local_sft_replay: LocalSFTDataset,
     *,
     config: ToyTrainConfig,
+    expected_action_size: int,
 ) -> None:
     if len(metrics) != completed_updates:
         raise ValueError("checkpoint metric history does not match completed_updates")
@@ -545,7 +538,7 @@ def _validate_restored_history(
                 or row["opd_rollout_episodes"]
                 != float(config.opd_episodes_per_update)
                 or row["opd_annotation_scored_actions"]
-                != JammedChainEnv.action_size * expected_examples
+                != expected_action_size * expected_examples
             ):
                 raise ValueError("checkpoint OPD collection metrics are inconsistent")
             expected_annotation_cost = (
@@ -651,9 +644,10 @@ def run_training(
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
 
+    runtime_adapter = ToyRuntimeAdapter(config.environment_config())
     model = ActorCritic(
-        JammedChainEnv.observation_size,
-        JammedChainEnv.action_size,
+        runtime_adapter.spec.observation_size,
+        runtime_adapter.spec.action_size,
         config.hidden_size,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -694,6 +688,7 @@ def run_training(
             local_sft_evaluations,
             local_sft_replay,
             config=config,
+            expected_action_size=runtime_adapter.spec.action_size,
         )
 
     with metrics_path.open("w", encoding="utf-8") as metrics_stream:
@@ -810,7 +805,7 @@ def run_training(
                 extraction = extract_student_only_opd(
                     opd_episodes,
                     config.opd_annotator(),
-                    expected_action_size=JammedChainEnv.action_size,
+                    expected_action_size=runtime_adapter.spec.action_size,
                     collection_id=update_index,
                 )
                 opd_dataset = extraction.dataset

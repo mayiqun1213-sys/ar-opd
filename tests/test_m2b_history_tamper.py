@@ -31,6 +31,7 @@ class M2BHistoryRateTamperTest(unittest.TestCase):
             [],
             LocalSFTDataset(),
             config=config,
+            expected_action_size=2,
         )
 
         tampered = {
@@ -44,6 +45,7 @@ class M2BHistoryRateTamperTest(unittest.TestCase):
                 [],
                 LocalSFTDataset(),
                 config=config,
+                expected_action_size=2,
             )
 
     def test_enabled_history_rejects_out_of_range_success_and_disagreement(
@@ -80,6 +82,7 @@ class M2BHistoryRateTamperTest(unittest.TestCase):
                         [],
                         LocalSFTDataset(),
                         config=config,
+                        expected_action_size=2,
                     )
 
 

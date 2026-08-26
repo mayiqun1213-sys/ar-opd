@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -27,6 +28,15 @@ class StudentProposal:
     log_prob: float
     value: float
 
+    def __post_init__(self) -> None:
+        if isinstance(self.action, bool) or not isinstance(self.action, int):
+            raise TypeError("Student action must be an integer")
+        for name, value in (("log_prob", self.log_prob), ("value", self.value)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                raise TypeError(f"Student {name} must be a real number")
+            if not math.isfinite(value):
+                raise ValueError(f"Student {name} must be finite")
+
 
 @dataclass(frozen=True)
 class TeacherProposal:
@@ -34,10 +44,17 @@ class TeacherProposal:
     recovery_actions: tuple[int, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "correction_actions", tuple(self.correction_actions))
+        object.__setattr__(self, "recovery_actions", tuple(self.recovery_actions))
         if len(self.correction_actions) != 1:
             raise ValueError("teacher correction must contain exactly one action")
         if not self.recovery_actions:
             raise ValueError("teacher recovery must contain at least one action")
+        if any(
+            isinstance(action, bool) or not isinstance(action, int)
+            for action in (*self.correction_actions, *self.recovery_actions)
+        ):
+            raise TypeError("Teacher actions must be integers")
 
     @property
     def generated_steps(self) -> int:

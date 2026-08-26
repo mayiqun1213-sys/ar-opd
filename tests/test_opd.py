@@ -13,7 +13,6 @@ from ar_opd.opd import (
     OPDConfig,
     OPDDataset,
     OPDExample,
-    ToyOracleDistributionAnnotator,
     extract_student_only_opd,
     opd_forward_kl,
     opd_update,
@@ -23,6 +22,7 @@ from ar_opd.opd import (
 from ar_opd.rollout import RolloutCollector, RolloutConfig
 from ar_opd.teacher import OracleTeacher
 from ar_opd.toy_env import ChainAction, JammedChainConfig, JammedChainEnv
+from ar_opd.toy_runtime import ToyOracleDistributionAnnotator
 
 
 def collect_episode(probe_probability: float = 0.0):
