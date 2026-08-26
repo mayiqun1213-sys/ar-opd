@@ -1,4 +1,4 @@
-"""Command-line entry point for the first end-to-end AR-OPD smoke loop."""
+"""Command-line entry point for the end-to-end toy AR-OPD training loop."""
 
 from __future__ import annotations
 
@@ -8,11 +8,23 @@ import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
-from typing import Any
+from typing import Any, Iterable
 
 import torch
 
+from ar_opd.checkpointing import (
+    load_training_checkpoint,
+    save_training_checkpoint,
+)
 from ar_opd.core import EpisodeRollout
+from ar_opd.distillation import (
+    LocalSFTConfig,
+    LocalSFTDataset,
+    LocalSFTExample,
+    extract_local_sft_examples,
+    local_sft_update,
+)
+from ar_opd.distillation_replay import append_local_sft_replay
 from ar_opd.models import ActorCritic
 from ar_opd.ppo import PPOConfig, build_batch, ppo_update
 from ar_opd.rollout import RolloutCollector, RolloutConfig
@@ -43,7 +55,25 @@ class ToyTrainConfig:
     entropy_coefficient: float = 0.01
     max_grad_norm: float = 1.0
     ppo_epochs: int = 4
+    local_sft_epochs: int = 0
+    local_sft_learning_rate: float = 0.01
+    corrective_sft_coefficient: float = 1.0
+    fallback_sft_coefficient: float = 1.0
+    local_sft_max_grad_norm: float = 1.0
+    local_sft_replay_capacity_per_kind: int = 256
     output_dir: str = "outputs/toy_smoke"
+
+    def __post_init__(self) -> None:
+        if self.updates < 1:
+            raise ValueError("updates must be positive")
+        if self.episodes_per_update < 1 or self.evaluation_episodes < 1:
+            raise ValueError("training and evaluation episode counts must be positive")
+        if self.hidden_size < 1:
+            raise ValueError("hidden_size must be positive")
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive")
+        if self.local_sft_replay_capacity_per_kind < 1:
+            raise ValueError("local SFT replay capacity must be positive")
 
     @classmethod
     def from_json(cls, path: str | Path) -> ToyTrainConfig:
@@ -82,6 +112,15 @@ class ToyTrainConfig:
             epochs=self.ppo_epochs,
         )
 
+    def local_sft_config(self) -> LocalSFTConfig:
+        return LocalSFTConfig(
+            epochs=self.local_sft_epochs,
+            learning_rate=self.local_sft_learning_rate,
+            corrective_coefficient=self.corrective_sft_coefficient,
+            fallback_coefficient=self.fallback_sft_coefficient,
+            max_grad_norm=self.local_sft_max_grad_norm,
+        )
+
 
 def _aggregate_episodes(episodes: list[EpisodeRollout]) -> dict[str, float]:
     if not episodes:
@@ -105,7 +144,9 @@ def _aggregate_episodes(episodes: list[EpisodeRollout]) -> dict[str, float]:
         "teacher_executed_steps": float(
             sum(episode.teacher_costs.executed_teacher_steps for episode in episodes)
         ),
-        "teacher_query_cost": sum(episode.teacher_costs.query_cost for episode in episodes),
+        "teacher_query_cost": sum(
+            episode.teacher_costs.query_cost for episode in episodes
+        ),
         "teacher_execution_cost": sum(
             episode.teacher_costs.execution_cost for episode in episodes
         ),
@@ -165,10 +206,125 @@ def evaluate(
     return _aggregate_episodes(episodes)
 
 
+def _validate_student_only_metrics(metrics: dict[str, float]) -> None:
+    teacher_keys = (
+        "teacher_probe_count",
+        "teacher_query_count",
+        "teacher_generated_steps",
+        "teacher_executed_steps",
+        "teacher_query_cost",
+        "teacher_execution_cost",
+    )
+    if any(metrics[key] != 0.0 for key in teacher_keys):
+        raise AssertionError("student-only evaluation used Teacher resources")
+
+
+def _clear_optimizer_state(
+    optimizer: torch.optim.Optimizer,
+    parameters: Iterable[torch.nn.Parameter],
+) -> int:
+    """Drop stale PPO moments after another optimizer changes actor weights."""
+
+    cleared = 0
+    for parameter in parameters:
+        if parameter in optimizer.state:
+            del optimizer.state[parameter]
+            cleared += 1
+    return cleared
+
+
+def _segment_count(examples: tuple[LocalSFTExample, ...]) -> int:
+    return len(
+        {
+            (
+                example.collection_id,
+                example.episode_index,
+                example.decision_id,
+                example.kind,
+            )
+            for example in examples
+        }
+    )
+
+
+def _validate_resume_configuration(
+    saved_config: dict[str, Any],
+    config: ToyTrainConfig,
+    completed_updates: int,
+) -> None:
+    if completed_updates > config.updates:
+        raise ValueError(
+            "resume checkpoint has more completed updates than the requested run"
+        )
+    current = asdict(config)
+    ignored = {"updates", "output_dir"}
+    saved_comparable = {
+        key: value for key, value in saved_config.items() if key not in ignored
+    }
+    current_comparable = {
+        key: value for key, value in current.items() if key not in ignored
+    }
+    if saved_comparable != current_comparable:
+        mismatches = sorted(
+            key
+            for key in saved_comparable.keys() | current_comparable.keys()
+            if saved_comparable.get(key) != current_comparable.get(key)
+        )
+        raise ValueError(
+            "resume config differs in immutable fields: " + ", ".join(mismatches)
+        )
+
+
+def _validate_restored_history(
+    completed_updates: int,
+    metrics: list[dict[str, Any]],
+    local_sft_evaluations: list[dict[str, Any]],
+    local_sft_replay: LocalSFTDataset,
+    *,
+    local_sft_enabled: bool,
+) -> None:
+    if len(metrics) != completed_updates:
+        raise ValueError("checkpoint metric history does not match completed_updates")
+    for index, row in enumerate(metrics, start=1):
+        if row.get("update") != float(index):
+            raise ValueError("checkpoint metric update ids must be contiguous")
+    expected_evaluations = completed_updates if local_sft_enabled else 0
+    if len(local_sft_evaluations) != expected_evaluations:
+        raise ValueError("checkpoint local-SFT evaluations do not match training history")
+    for index, row in enumerate(local_sft_evaluations, start=1):
+        if row.get("update") != index:
+            raise ValueError("checkpoint local-SFT evaluation ids must be contiguous")
+    replay_examples = (
+        *local_sft_replay.corrective,
+        *local_sft_replay.fallback,
+    )
+    if any(
+        example.collection_id >= completed_updates for example in replay_examples
+    ):
+        raise ValueError("checkpoint replay provenance exceeds completed updates")
+    if metrics:
+        expected_replay_sizes = {
+            "replay_corrective_sft_examples": float(
+                len(local_sft_replay.corrective)
+            ),
+            "replay_fallback_sft_examples": float(len(local_sft_replay.fallback)),
+        }
+        if any(
+            metrics[-1].get(key) != value
+            for key, value in expected_replay_sizes.items()
+        ):
+            raise ValueError("checkpoint replay metrics disagree with replay state")
+
+
+def _write_metric(stream: Any, metrics: dict[str, Any]) -> None:
+    stream.write(json.dumps(metrics, sort_keys=True) + "\n")
+
+
 def run_training(
     config: ToyTrainConfig,
     *,
     output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
 ) -> dict[str, Any]:
     random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -186,10 +342,41 @@ def run_training(
     destination = Path(output_dir or config.output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     metrics_path = destination / "metrics.jsonl"
-    update_metrics: list[dict[str, float]] = []
+    checkpoint_path = destination / "checkpoint.pt"
+
+    start_update = 0
+    update_metrics: list[dict[str, Any]] = []
+    local_sft_evaluations: list[dict[str, Any]] = []
+    local_sft_replay = LocalSFTDataset()
+    if resume_from is not None:
+        loaded = load_training_checkpoint(
+            resume_from,
+            model=model,
+            ppo_optimizer=optimizer,
+            generator=generator,
+            map_location=device,
+        )
+        start_update = loaded.completed_updates
+        _validate_resume_configuration(loaded.config, config, start_update)
+        update_metrics = [dict(row) for row in loaded.metrics]
+        local_sft_evaluations = [
+            dict(row) for row in loaded.local_sft_evaluations
+        ]
+        local_sft_replay = loaded.local_sft_replay
+        _validate_restored_history(
+            start_update,
+            update_metrics,
+            local_sft_evaluations,
+            local_sft_replay,
+            local_sft_enabled=config.local_sft_epochs > 0,
+        )
 
     with metrics_path.open("w", encoding="utf-8") as metrics_stream:
-        for update_index in range(config.updates):
+        for restored_metrics in update_metrics:
+            _write_metric(metrics_stream, restored_metrics)
+        metrics_stream.flush()
+
+        for update_index in range(start_update, config.updates):
             episodes = _collect_episodes(
                 model,
                 config,
@@ -200,15 +387,176 @@ def run_training(
                 generator=generator,
             )
             batch = build_batch(episodes, model, config.ppo_config())
-            losses = ppo_update(model, optimizer, batch, config.ppo_config())
-            metrics = {
+            ppo_metrics = ppo_update(model, optimizer, batch, config.ppo_config())
+
+            replay_before_corrective = len(local_sft_replay.corrective)
+            replay_before_fallback = len(local_sft_replay.fallback)
+            replay_before_corrective_segments = _segment_count(
+                local_sft_replay.corrective
+            )
+            replay_before_fallback_segments = _segment_count(
+                local_sft_replay.fallback
+            )
+            dataset = LocalSFTDataset()
+            fresh_local_sft = LocalSFTDataset()
+            before_local_sft = None
+            after_local_sft = None
+            if config.local_sft_epochs > 0:
+                fresh_local_sft = extract_local_sft_examples(
+                    episodes,
+                    collection_id=update_index,
+                )
+                local_sft_replay = append_local_sft_replay(
+                    local_sft_replay,
+                    fresh_local_sft,
+                    capacity_per_kind=config.local_sft_replay_capacity_per_kind,
+                )
+                dataset = local_sft_replay
+                evaluation_seed = config.seed + 3_000_000 + update_index
+                before_local_sft = evaluate(
+                    model,
+                    config,
+                    probe_probability=0.0,
+                    seed=evaluation_seed,
+                    generator=generator,
+                )
+                _validate_student_only_metrics(before_local_sft)
+
+            local_sft_metrics = local_sft_update(
+                model,
+                dataset,
+                config.local_sft_config(),
+            )
+            cleared_actor_states = 0
+            if local_sft_metrics["local_sft_optimizer_steps"] > 0.0:
+                cleared_actor_states = _clear_optimizer_state(
+                    optimizer,
+                    model.actor_head.parameters(),
+                )
+
+            if before_local_sft is not None:
+                after_local_sft = evaluate(
+                    model,
+                    config,
+                    probe_probability=0.0,
+                    seed=evaluation_seed,
+                    generator=generator,
+                )
+                _validate_student_only_metrics(after_local_sft)
+                local_sft_evaluations.append(
+                    {
+                        "update": update_index + 1,
+                        "student_only_before": before_local_sft,
+                        "student_only_after": after_local_sft,
+                    }
+                )
+
+            replay_corrective = len(local_sft_replay.corrective)
+            replay_fallback = len(local_sft_replay.fallback)
+            replay_corrective_segments = _segment_count(
+                local_sft_replay.corrective
+            )
+            replay_fallback_segments = _segment_count(local_sft_replay.fallback)
+            fresh_corrective_segments = _segment_count(fresh_local_sft.corrective)
+            fresh_fallback_segments = _segment_count(fresh_local_sft.fallback)
+            metrics: dict[str, Any] = {
                 "update": float(update_index + 1),
                 **_aggregate_episodes(episodes),
-                **losses,
+                **ppo_metrics,
+                **local_sft_metrics,
+                "new_corrective_sft_examples": float(len(fresh_local_sft.corrective)),
+                "new_fallback_sft_examples": float(len(fresh_local_sft.fallback)),
+                "replay_corrective_sft_examples": float(replay_corrective),
+                "replay_fallback_sft_examples": float(replay_fallback),
+                "replay_corrective_segments": float(replay_corrective_segments),
+                "replay_fallback_segments": float(replay_fallback_segments),
+                "replay_corrective_evicted_examples": float(
+                    max(
+                        0,
+                        replay_before_corrective
+                        + len(fresh_local_sft.corrective)
+                        - replay_corrective,
+                    )
+                ),
+                "replay_fallback_evicted_examples": float(
+                    max(
+                        0,
+                        replay_before_fallback
+                        + len(fresh_local_sft.fallback)
+                        - replay_fallback,
+                    )
+                ),
+                "replay_corrective_evicted_segments": float(
+                    max(
+                        0,
+                        replay_before_corrective_segments
+                        + fresh_corrective_segments
+                        - replay_corrective_segments,
+                    )
+                ),
+                "replay_fallback_evicted_segments": float(
+                    max(
+                        0,
+                        replay_before_fallback_segments
+                        + fresh_fallback_segments
+                        - replay_fallback_segments,
+                    )
+                ),
+                "replay_corrective_soft_cap_ratio": (
+                    replay_corrective / config.local_sft_replay_capacity_per_kind
+                ),
+                "replay_fallback_soft_cap_ratio": (
+                    replay_fallback / config.local_sft_replay_capacity_per_kind
+                ),
+                "ppo_actor_optimizer_states_cleared": float(cleared_actor_states),
             }
+            if before_local_sft is not None and after_local_sft is not None:
+                metrics.update(
+                    {
+                        "student_only_success_before_local_sft": before_local_sft[
+                            "success_rate"
+                        ],
+                        "student_only_success_after_local_sft": after_local_sft[
+                            "success_rate"
+                        ],
+                        "student_only_return_before_local_sft": before_local_sft[
+                            "mean_task_return"
+                        ],
+                        "student_only_return_after_local_sft": after_local_sft[
+                            "mean_task_return"
+                        ],
+                    }
+                )
             update_metrics.append(metrics)
-            metrics_stream.write(json.dumps(metrics, sort_keys=True) + "\n")
+            _write_metric(metrics_stream, metrics)
             metrics_stream.flush()
+            save_training_checkpoint(
+                checkpoint_path,
+                model=model,
+                ppo_optimizer=optimizer,
+                completed_updates=update_index + 1,
+                config=config,
+                metrics=update_metrics,
+                local_sft_evaluations=local_sft_evaluations,
+                local_sft_replay=local_sft_replay,
+                generator=generator,
+            )
+
+    # Materialize a checkpoint in a new destination only when resume had
+    # already completed every requested update. Fresh work checkpoints inside
+    # the loop, avoiding a duplicate final write.
+    if start_update == config.updates:
+        save_training_checkpoint(
+            checkpoint_path,
+            model=model,
+            ppo_optimizer=optimizer,
+            completed_updates=config.updates,
+            config=config,
+            metrics=update_metrics,
+            local_sft_evaluations=local_sft_evaluations,
+            local_sft_replay=local_sft_replay,
+            generator=generator,
+        )
 
     hybrid_eval = evaluate(
         model,
@@ -224,22 +572,16 @@ def run_training(
         seed=config.seed + 2_000_000,
         generator=generator,
     )
-    checkpoint_path = destination / "checkpoint.pt"
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "config": asdict(config),
-            "completed_updates": config.updates,
-        },
-        checkpoint_path,
-    )
+    _validate_student_only_metrics(student_only_eval)
     summary: dict[str, Any] = {
         "updates": update_metrics,
+        "local_sft_evaluations": local_sft_evaluations,
         "hybrid_eval": hybrid_eval,
         "student_only_eval": student_only_eval,
         "checkpoint": str(checkpoint_path),
         "metrics": str(metrics_path),
+        "resumed_from": str(resume_from) if resume_from is not None else None,
+        "start_update": start_update,
     }
     summary_path = destination / "summary.json"
     with summary_path.open("w", encoding="utf-8") as stream:
@@ -252,9 +594,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="path to a toy training JSON config")
     parser.add_argument("--output-dir", help="override the generated artifact directory")
+    parser.add_argument("--resume", help="resume from a training checkpoint")
     arguments = parser.parse_args()
     config = ToyTrainConfig.from_json(arguments.config)
-    summary = run_training(config, output_dir=arguments.output_dir)
+    summary = run_training(
+        config,
+        output_dir=arguments.output_dir,
+        resume_from=arguments.resume,
+    )
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
