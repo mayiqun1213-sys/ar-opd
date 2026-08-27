@@ -24,15 +24,23 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 For an editable development install with optional lint/test tooling, use
 `python -m pip install -e '.[dev]'`.
 
-The current deterministic toy loop covers value-gated S/T/F rollout,
-decision-boundary PPO, executed-only local SFT, and strict Student-only OPD
-without model downloads or external services. See
+The deterministic toy loop covers value-gated S/T/F rollout, decision-boundary
+PPO, executed-only local SFT, and strict Student-only OPD. A dependency-free
+TextWorld-like smoke now covers fixed global action IDs, dynamic valid-action
+masks, exact reset/replay candidate evaluation, and one PPO update:
+
+```bash
+PYTHONPATH=src python -m ar_opd.fake_textworld_smoke
+```
+
+Neither path downloads models or calls external services. See
 [`docs/implementation_notes.md`](docs/implementation_notes.md),
 [`docs/local_distillation.md`](docs/local_distillation.md),
 [`docs/opd.md`](docs/opd.md), and
-[`docs/environment_adapter.md`](docs/environment_adapter.md) for the
-enforced data and optimizer boundaries.
-TextWorldExpress support will be added behind an environment adapter.
+[`docs/environment_adapter.md`](docs/environment_adapter.md) for the enforced
+data and optimizer boundaries. The exact TextWorld replay contract and current
+real-JVM limitation are recorded in
+[`docs/textworld_replay.md`](docs/textworld_replay.md).
 
 ## Repository policy
 

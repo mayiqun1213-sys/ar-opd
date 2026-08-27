@@ -54,39 +54,46 @@ existing S/T/F scores, probe RNG order, Torch generator stream, Teacher costs,
 termination behavior, and exact-resume results. Toy branches are closed after
 each preview and cannot mutate the online environment.
 
-## TextWorldExpress boundary for M3b
+## Replayable TextWorld boundary in M3b
 
-This machine currently has neither Java nor TextWorldExpress, so M3a does not
-claim a working JVM integration. The future backend must remain a raw
-environment layer underneath a text/action codec rather than pretending its
-dynamic action strings are the fixed dense action space used by the current
-toy actor.
+M3b implements the raw backend boundary underneath a fixed policy-facing
+action codec. `TextWorldRuntimeConfig` binds a backend/revision identity,
+canonical game/fold/parameter configuration, signed-32-bit episode seed,
+project action cap, encoder ABI, and ordered global command vocabulary. Dynamic
+backend menus become Boolean masks over that vocabulary; local menu positions
+never become policy action IDs. The upstream-only `help` command is rejected.
 
-The official TextWorldExpress wrapper starts a JVM through Py4J when
-`TextWorldExpressEnv` is constructed. Its `reset` accepts seed/game parameters,
-`step` accepts an action string, and `infos["validActions"]` changes with the
-state. Its public `done` combines task outcomes and an internal step limit.
-Therefore the AR-OPD backend must:
+`BackendBoundary` carries the official observable fields needed for exact
+replay: observation, look, inventory, valid actions, raw and normalized scores,
+task description, and raw task success/failure flags. The runtime rejects
+conflicting flags and derives failure, success (`tasksuccess` or normalized
+`score >= 1.0`), or active centrally. Raw `done` must agree with that natural
+classification. Only afterward does AR-OPD apply its own action cap as
+truncation, with natural termination taking precedence.
 
-- pass a complete explicit episode seed/spec on every reset;
-- validate actions against the current dynamic valid-action set;
-- maintain its own action trace, cumulative score, and boundary fingerprint;
-- classify task success/failure as termination and enforce the project step
-  cap separately as truncation;
-- use idempotent explicit close around every JVM resource;
-- use a bounded scratch environment plus reset/replay for counterfactual
-  branches, rather than launching the upstream replay-based `clone` once per
-  candidate;
-- treat generated gold paths as initial-state walkthroughs, not as a local
-  correction oracle after Student divergence.
+Each online step records the stable ID, exact decoded command, score delta,
+outcome, and before/after fingerprints. One independent scratch backend is
+reused for every S/T/F preview. It resets with the complete episode spec,
+replays the online command prefix, compares every trace row, then executes the
+candidate. A mismatch fails closed and the online cursor is checked before and
+after evaluation. The context-managed adapter closes scratch then online on
+normal exit and every partial-construction or runtime exception.
 
-The next implementation step is a dependency-free fake TextWorldExpress
-backend that tests dynamic action mapping, replay cursors, boundary mismatch
-failure, and termination/truncation classification. A real backend and smoke
-test follow only after a compatible Java/Python runtime is available.
+The dependency-free fake backend and CLI test these contracts, including
+dynamic masks, command/score drift, opaque `done`, terminal-versus-cap priority,
+Student-only Teacher elision, `S -> F`, and one PPO update:
 
-Primary upstream references:
+```bash
+PYTHONPATH=src python -m ar_opd.fake_textworld_smoke
+```
 
-- [TextWorldExpress repository and usage](https://github.com/cognitiveailab/TextWorldExpress)
-- [Python wrapper implementation](https://github.com/cognitiveailab/TextWorldExpress/blob/main/textworld_express/textworld_express.py)
-- [Official wrapper tests](https://github.com/cognitiveailab/TextWorldExpress/blob/main/tests/test_textworld_express.py)
+This machine still has neither Java nor TextWorldExpress, so no real JVM
+integration is claimed. A future concrete backend must wrap upstream `close`
+with its own idempotence guard and construct TextWorldExpress with an internal
+step limit strictly above the AR-OPD cap, so upstream truncation cannot appear
+as opaque `done`. Generated gold paths remain initial-state walkthroughs, not
+local correction oracles after Student divergence. The full pinned upstream
+analysis and source links live in [`textworld_replay.md`](textworld_replay.md).
+
+The current Student interface also has no mask input. Until the next hard-mask
+milestone, only deliberately valid fake policies are safe on this adapter.

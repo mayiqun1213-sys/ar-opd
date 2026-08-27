@@ -64,12 +64,28 @@ not a requirement of every online environment. Student-only collection does
 not instantiate a Teacher. The toy path remains numerically identical and the
 checkpoint schema is unchanged.
 
-TextWorldExpress will remain optional rather than a base dependency. This
-machine has neither Java nor TextWorldExpress, so a real JVM backend cannot yet
-be smoke-tested. Its dynamic string actions require a separate policy-facing
-codec, and its replay-based clone is too expensive for one JVM per candidate.
-The next milestone will use a fake backend to establish dynamic action mapping,
-explicit episode traces, replay boundary fingerprints, and independent
-termination/truncation classification before adding the real lazy-imported
-backend. See [`environment_adapter.md`](environment_adapter.md) for the tested
-M3a contract and the M3b integration constraints.
+TextWorldExpress remains optional rather than a base dependency. M3b now uses a
+strict dependency-free backend to establish the integration contract before a
+JVM is introduced. Policy actions use fixed global command IDs and each state
+provides a mask over that vocabulary. Every online transition stores both its
+ID and exact command. One independent scratch backend is reused sequentially:
+it resets, replays the complete online prefix, verifies canonical boundary
+fingerprints, and only then previews S/T/F. Candidate evaluation cannot mutate
+the online cursor.
+
+The boundary fingerprint covers observation, look, inventory, raw and
+normalized scores, valid actions, raw task flags, task description, local step
+state, and the explicit episode/backend ABI. Runtime code derives natural task
+outcomes from the raw flags and normalized score, rejects opaque upstream
+`done`, then applies the project action cap as truncation. Natural termination
+wins when both occur on the same action. The fake smoke exercises Hybrid
+`S -> F`, Student-only truncation, resource cleanup, and a PPO update without
+Java, model downloads, or external services.
+
+This machine still has neither Java nor TextWorldExpress, so M3b does not claim
+a working real JVM backend. The current ActorCritic also does not yet consume
+the dynamic mask; the fake Student is deliberately fixed to actions valid at
+every visited state. Hard-masked sampling/log probabilities/OPD are the next
+algorithm milestone. See [`textworld_replay.md`](textworld_replay.md) for the
+pinned upstream behavior and [`environment_adapter.md`](environment_adapter.md)
+for ownership details.
